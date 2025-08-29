@@ -157,6 +157,20 @@ class App(tk.Tk):
         self.write_btn = ttk.Button(opts_frame, text="Write", command=self.on_write_clicked, state=tk.DISABLED)
         self.write_btn.grid(row=0, column=4, **padding)
 
+        # ASCII helpers: User/Password fields and a mode toggle
+        self.user_entry = LabeledEntry(opts_frame, "User")
+        self.password_entry = LabeledEntry(opts_frame, "Password")
+        self.user_entry.grid(row=1, column=0, columnspan=2, sticky="ew", **padding)
+        self.password_entry.grid(row=1, column=2, columnspan=2, sticky="ew", **padding)
+
+        self.ascii_mode_var = tk.BooleanVar(value=False)
+        self.ascii_chk = ttk.Checkbutton(
+            opts_frame,
+            text="ASCII encode (User+Password or Value[s])",
+            variable=self.ascii_mode_var,
+        )
+        self.ascii_chk.grid(row=1, column=4, sticky="w", **padding)
+
         result_frame = ttk.LabelFrame(parent, text="Result")
         result_frame.pack(fill="both", expand=True, padx=6, pady=6)
         self.write_output = tk.Text(result_frame, height=14)
@@ -288,27 +302,47 @@ class App(tk.Tk):
         self.write_output.delete("1.0", tk.END)
         self.write_output.insert(tk.END, f"Writing {op} at {address} with '{values_text}'...\n")
 
-        try:
-            if op == "Single Coil":
-                val = values_text.strip()
-                if val.lower() in {"true", "on", "1"}:
-                    parsed: List[int] = [1]
-                elif val.lower() in {"false", "off", "0"}:
-                    parsed = [0]
-                else:
-                    parsed = [int(val)]
-            elif op == "Single Register":
-                parsed = [int(values_text)]
-            elif op == "Multiple Registers":
-                parts = [p for p in values_text.split(",") if p.strip()]
-                parsed = [int(p.strip()) for p in parts]
-                if not parsed:
-                    raise ValueError
+        # ASCII mode: build payload from user/password or from values field as ASCII
+        if self.ascii_mode_var.get():
+            user_txt = self.user_entry.get_str()
+            pass_txt = self.password_entry.get_str()
+            ascii_source: str
+            if user_txt or pass_txt:
+                # Join as user:password when either provided
+                ascii_source = f"{user_txt}:{pass_txt}" if pass_txt else user_txt
             else:
-                raise RuntimeError(f"Unsupported op: {op}")
-        except ValueError:
-            messagebox.showerror("Invalid input", "Value(s) must be integer(s). For multiple, use comma-separated list.")
-            return
+                ascii_source = values_text
+
+            try:
+                parsed = self._ascii_to_registers(ascii_source)
+            except ValueError as exc:
+                messagebox.showerror("Invalid ASCII", str(exc))
+                return
+            # Force to multiple registers operation for ASCII
+            op = "Multiple Registers"
+            self.write_output.insert(tk.END, f"ASCII -> registers: {parsed}\n")
+        else:
+            try:
+                if op == "Single Coil":
+                    val = values_text.strip()
+                    if val.lower() in {"true", "on", "1"}:
+                        parsed = [1]
+                    elif val.lower() in {"false", "off", "0"}:
+                        parsed = [0]
+                    else:
+                        parsed = [int(val)]
+                elif op == "Single Register":
+                    parsed = [int(values_text)]
+                elif op == "Multiple Registers":
+                    parts = [p for p in values_text.split(",") if p.strip()]
+                    parsed = [int(p.strip()) for p in parts]
+                    if not parsed:
+                        raise ValueError
+                else:
+                    raise RuntimeError(f"Unsupported op: {op}")
+            except ValueError:
+                messagebox.showerror("Invalid input", "Value(s) must be integer(s). For multiple, use comma-separated list.")
+                return
 
         def do_write() -> Tuple[int, ...]:
             assert self.client is not None
@@ -345,6 +379,26 @@ class App(tk.Tk):
                 w.config(state=tk.DISABLED if busy else tk.NORMAL)
             except tk.TclError:
                 pass
+
+    def _ascii_to_registers(self, text: str) -> List[int]:
+        """Convert ASCII string into 16-bit register list (big-endian per 2 chars).
+
+        Example: 'ABCD' -> [0x4142, 0x4344]. For odd-length strings, the last
+        register packs the final byte in the high position with 0 in the low.
+        """
+        try:
+            data = text.encode("ascii", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Text must contain ASCII characters only") from exc
+
+        out: List[int] = []
+        i = 0
+        while i < len(data):
+            high = data[i]
+            low = data[i + 1] if i + 1 < len(data) else 0
+            out.append((high << 8) | low)
+            i += 2
+        return out
 
 
 def main() -> None:
